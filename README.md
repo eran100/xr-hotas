@@ -2,9 +2,13 @@
 
 Allows you to use your motion controllers as throttle & joystick in games that don't support motion controllers but do support gamepad input.
 
+Inspired by the controls used in some VRChat worlds such as Test Pilots.
+
 Example titles that work with this tool:
 - Elite: Dangerous
 - DCS: World
+
+For more immersion, I also recommend making use of a game-specific WayVR panel for the rest of the switches & buttons.
 
 ## Installing
 
