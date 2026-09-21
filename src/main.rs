@@ -62,7 +62,6 @@ fn main_inner(args: Args) -> anyhow::Result<()> {
 
     let max_angle_rad = args.max_angle.to_radians();
 
-    let triggers = [ABS_Z, ABS_RZ];
     let mut operations: [Operation; 2] = [Operation::NoThrottle, Operation::NoStick];
     let mut hotas = Hotas::new()?;
     let mut throttle = 0.0;
@@ -75,7 +74,9 @@ fn main_inner(args: Args) -> anyhow::Result<()> {
         for (hand_idx, operation) in operations.iter_mut().enumerate() {
             let controller = &mut xr.controllers[hand_idx];
 
-            hotas.set_axis(triggers[hand_idx], controller.trigger)?;
+            if hand_idx == 1 {
+                hotas.set_axis(ABS_RZ, controller.trigger)?;
+            }
 
             for btn in controller.buttons.iter() {
                 hotas.set_button(btn.code, btn.now_active)?;
@@ -102,7 +103,7 @@ fn main_inner(args: Args) -> anyhow::Result<()> {
                     // next calculation relative to this frame
                     *operation = Operation::Throttle(controller.position);
 
-                    hotas.set_axis(ABS_RY, -throttle)?;
+                    hotas.set_axis(ABS_Z, -throttle)?;
                 }
                 Operation::NoStick => {
                     if controller.grip_active {
