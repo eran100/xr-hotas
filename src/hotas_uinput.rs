@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::c_char;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -39,6 +40,15 @@ pub const BTN_DPAD_UP: u16 = 0x220;
 pub const BTN_DPAD_DOWN: u16 = 0x221;
 pub const BTN_DPAD_LEFT: u16 = 0x222;
 pub const BTN_DPAD_RIGHT: u16 = 0x223;
+
+// keyboard keys used by the right-trigger modifier layer
+pub const KEY_M: u16 = 50;
+pub const KEY_UP: u16 = 103;
+pub const KEY_LEFT: u16 = 105;
+pub const KEY_RIGHT: u16 = 106;
+pub const KEY_DOWN: u16 = 108;
+
+const KEY_ALL: &[u16] = &[KEY_M, KEY_UP, KEY_LEFT, KEY_RIGHT, KEY_DOWN];
 
 const BTN_ALL: &[u16] = &[
     BTN_SOUTH,
@@ -158,6 +168,11 @@ pub struct Hotas {
     file: File,
 }
 
+pub struct Keyboard {
+    file: File,
+    pressed: HashSet<u16>,
+}
+
 impl Hotas {
     pub fn new() -> io::Result<Self> {
         let file = open_uinput()?;
@@ -219,6 +234,74 @@ impl Hotas {
     }
 }
 
+impl Keyboard {
+    pub fn new() -> io::Result<Self> {
+        let file = open_uinput()?;
+        let fd = file.as_raw_fd();
+
+        ioctl_int(fd, UI_SET_EVBIT, EV_KEY as c_int, "enable EV_KEY")?;
+        for code in KEY_ALL {
+            ioctl_int(fd, UI_SET_KEYBIT, *code as c_int, "enable a keyboard key")?;
+        }
+
+        let mut setup: UinputSetup = unsafe { std::mem::zeroed() };
+        setup.id = InputId {
+            bustype: BUS_VIRTUAL,
+            vendor: 0,
+            product: 0,
+            version: 0x0001,
+        };
+        let name = b"XR HOTAS Keyboard\0";
+        setup.name[..name.len()].copy_from_slice(name);
+
+        let phys = b"xr-hotas-keyboard\0";
+        let rc = unsafe { ioctl(fd, UI_SET_PHYS, phys.as_ptr() as *const c_char) };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        ioctl_ptr(fd, UI_DEV_SETUP, &setup, "configure the keyboard")?;
+        ioctl_none(fd, UI_DEV_CREATE, "create the keyboard")?;
+
+        Ok(Self {
+            file,
+            pressed: HashSet::new(),
+        })
+    }
+
+    pub fn set_key(&mut self, key_code: u16, pressed: bool) -> io::Result<()> {
+        if !KEY_ALL.contains(&key_code) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "keyboard key is not enabled on this virtual device",
+            ));
+        }
+
+        let changed = if pressed {
+            self.pressed.insert(key_code)
+        } else {
+            self.pressed.remove(&key_code)
+        };
+
+        if !changed {
+            return Ok(());
+        }
+
+        self.emit_synced(EV_KEY, key_code, if pressed { 1 } else { 0 })
+    }
+
+    fn emit_synced(&mut self, event_type: u16, code: u16, value: i32) -> io::Result<()> {
+        let events = [
+            InputEvent::new(event_type, code, value),
+            InputEvent::new(EV_SYN, SYN_REPORT, 0),
+        ];
+
+        let bytes =
+            unsafe { slice::from_raw_parts(events.as_ptr().cast::<u8>(), size_of_val(&events)) };
+        self.file.write_all(bytes)
+    }
+}
+
 impl InputEvent {
     const fn new(event_type: u16, code: u16, value: i32) -> Self {
         Self {
@@ -237,6 +320,16 @@ impl InputEvent {
 impl Drop for Hotas {
     fn drop(&mut self) {
         let _ = ioctl_none(self.file.as_raw_fd(), UI_DEV_DESTROY, "destroy the HOTAS");
+    }
+}
+
+impl Drop for Keyboard {
+    fn drop(&mut self) {
+        let pressed: Vec<u16> = self.pressed.iter().copied().collect();
+        for code in pressed {
+            let _ = self.emit_synced(EV_KEY, code, 0);
+        }
+        let _ = ioctl_none(self.file.as_raw_fd(), UI_DEV_DESTROY, "destroy the keyboard");
     }
 }
 
