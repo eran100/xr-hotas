@@ -102,7 +102,7 @@ fn main_inner(args: Args) -> anyhow::Result<()> {
                     // next calculation relative to this frame
                     *operation = Operation::Throttle(controller.position);
 
-                    hotas.set_axis(ABS_RY, -throttle)?;
+                    hotas.set_axis(ABS_RY, throttle)?;
                 }
                 Operation::NoStick => {
                     if controller.grip_active {
