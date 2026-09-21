@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     f32,
     process::ExitCode,
     sync::atomic::{AtomicBool, Ordering},
@@ -13,7 +14,10 @@ use signal_hook::{
 
 use crate::{
     helpers_xr::XrState,
-    hotas_uinput::{Hotas, ABS_RX, ABS_RY, ABS_RZ, ABS_X, ABS_Y, ABS_Z},
+    hotas_uinput::{
+        Hotas, Keyboard, ABS_RX, ABS_X, ABS_Y, ABS_Z, BTN_SELECT, BTN_START, BTN_THUMBR,
+        BTN_TL, BTN_TL2, BTN_TR, KEY_DOWN, KEY_LEFT, KEY_M, KEY_RIGHT, KEY_UP,
+    },
 };
 
 mod helpers_xr;
@@ -21,6 +25,9 @@ mod hotas_uinput;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 static BINDING: AtomicBool = AtomicBool::new(false);
+
+const MODIFIER_PRESS_THRESHOLD: f32 = 0.10;
+const MODIFIER_RELEASE_THRESHOLD: f32 = 0.05;
 
 #[allow(clippy::single_match_else)]
 fn setup_signal_hooks() -> anyhow::Result<()> {
@@ -64,21 +71,66 @@ fn main_inner(args: Args) -> anyhow::Result<()> {
 
     let mut operations: [Operation; 2] = [Operation::NoThrottle, Operation::NoStick];
     let mut hotas = Hotas::new()?;
+    let mut keyboard = Keyboard::new()?;
     let mut throttle = 0.0;
+    let mut right_modifier_active = false;
+    let mut consumed_right_thumb_buttons = HashSet::<u16>::new();
 
     while RUNNING.load(Ordering::Relaxed) {
         let binding_mode = BINDING.load(Ordering::Relaxed);
 
         xr.tick()?;
 
+        let modifier_threshold = if right_modifier_active {
+            MODIFIER_RELEASE_THRESHOLD
+        } else {
+            MODIFIER_PRESS_THRESHOLD
+        };
+        right_modifier_active = xr.controllers[1].trigger >= modifier_threshold;
+
+        if right_modifier_active {
+            for btn in xr.controllers[1].buttons.iter() {
+                if let Some(key_code) = modifier_key_for_button(btn.code) {
+                    keyboard.set_key(key_code, btn.now_active)?;
+                    if btn.now_active {
+                        consumed_right_thumb_buttons.insert(btn.code);
+                    }
+                }
+            }
+        } else {
+            for key_code in [KEY_M, KEY_UP, KEY_RIGHT, KEY_DOWN, KEY_LEFT] {
+                keyboard.set_key(key_code, false)?;
+            }
+        }
+
         for (hand_idx, operation) in operations.iter_mut().enumerate() {
             let controller = &mut xr.controllers[hand_idx];
 
-            if hand_idx == 1 {
-                hotas.set_axis(ABS_RZ, controller.trigger)?;
-            }
-
             for btn in controller.buttons.iter() {
+                if hand_idx == 1 {
+                    // The right trigger is a dedicated modifier on this branch.
+                    if btn.code == BTN_TL2 {
+                        hotas.set_button(btn.code, false)?;
+                        continue;
+                    }
+
+                    // While the modifier is held, right-thumb controls become keyboard keys.
+                    if right_modifier_active && modifier_key_for_button(btn.code).is_some() {
+                        hotas.set_button(btn.code, false)?;
+                        continue;
+                    }
+
+                    // If the modifier is released before the thumb control, do not leak the
+                    // still-held control back into the gamepad. Resume normal input after release.
+                    if consumed_right_thumb_buttons.contains(&btn.code) {
+                        hotas.set_button(btn.code, false)?;
+                        if !btn.now_active {
+                            consumed_right_thumb_buttons.remove(&btn.code);
+                        }
+                        continue;
+                    }
+                }
+
                 hotas.set_button(btn.code, btn.now_active)?;
             }
 
@@ -138,6 +190,17 @@ fn main_inner(args: Args) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn modifier_key_for_button(button_code: u16) -> Option<u16> {
+    match button_code {
+        BTN_THUMBR => Some(KEY_M),
+        BTN_SELECT => Some(KEY_UP),
+        BTN_TR => Some(KEY_RIGHT),
+        BTN_START => Some(KEY_DOWN),
+        BTN_TL => Some(KEY_LEFT),
+        _ => None,
+    }
 }
 
 fn apply_binding_mode(values: &mut Vec3, binding_mode: bool) {
